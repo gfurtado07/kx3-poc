@@ -107,40 +107,63 @@ def _find_coeffs(dst, src):
     return np.linalg.solve(np.array(A, dtype=float), B).tolist()
 
 
-def compor_tela_carplay(cutout_path):
-    """Clawdbot localiza o display; se for multimídia, encaixa a tela CarPlay real (warp PIL)."""
-    if not os.path.exists(CARPLAY_PATH):
-        return None
-    rp = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + "_ask.png")
-    shutil.copy(cutout_path, rp); os.chmod(rp, 0o644)
-    try:
-        info = _extract_json(claude_cli(TELA_PROMPT.replace("[[IMG]]", rp), allow_read=True, timeout=120))
-    except Exception:
-        info = {"tela": False}
-    finally:
-        try:
-            os.unlink(rp)
-        except OSError:
-            pass
-    if not info.get("tela"):
-        return None
-    cut = Image.open(cutout_path).convert("RGBA"); W, H = cut.size
-    cp = Image.open(CARPLAY_PATH).convert("RGBA"); w, h = cp.size
-    try:
-        quad = [(int(float(info[k][0]) / 100.0 * W), int(float(info[k][1]) / 100.0 * H)) for k in ("tl", "tr", "br", "bl")]
-    except Exception:
-        return None
-    coeffs = _find_coeffs(quad, [(0, 0), (w, 0), (w, h), (0, h)])
-    warped = cp.transform((W, H), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
-    mask = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(mask).polygon(quad, fill=255)
-    cut.paste(warped, (0, 0), mask)
-    out = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + "_tela.png")
-    cut.save(out)
-    return out
+# Frações do display dentro do quad do aparelho (2-DIN com coluna de botões à esquerda).
+# uL pula os botões; uR/vT/vB são insets finos. Default geral; pode virar override por SKU.
+SCREEN_FRACS = (0.085, 0.992, 0.010, 0.990)
 
 
-def tratar_foto(foto_url: str) -> str:
+def _device_quad(cutout_path):
+    """Acha os 4 cantos do APARELHO pelo contorno do canal alpha (recorte = fundo transparente)."""
+    import cv2
+    a = np.array(Image.open(cutout_path).convert("RGBA"))
+    mask = ((a[:, :, 3] > 20).astype(np.uint8)) * 255
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    c = max(cnts, key=cv2.contourArea)
+    peri = cv2.arcLength(c, True)
+    approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+    pts = approx.reshape(-1, 2).astype(float) if len(approx) == 4 else cv2.boxPoints(cv2.minAreaRect(c)).astype(float)
+    s = pts.sum(1); df = pts[:, 0] - pts[:, 1]
+    return [pts[np.argmin(s)], pts[np.argmax(df)], pts[np.argmax(s)], pts[np.argmin(df)]]  # tl,tr,br,bl
+
+
+def _bilinear(q, u, v):
+    tl, tr, br, bl = q
+    top = tl + (tr - tl) * u
+    bot = bl + (br - bl) * u
+    return top + (bot - top) * v
+
+
+def compor_tela_carplay(cutout_path, is_multimedia=False):
+    """Só p/ multimídias: detecta o aparelho (alpha) → calcula a tela por proporção → encaixa
+    a tela CarPlay real com warp de perspectiva (PIL). Retorna novo PNG ou None."""
+    if not is_multimedia or not os.path.exists(CARPLAY_PATH):
+        return None
+    try:
+        dev = _device_quad(cutout_path)
+        if dev is None:
+            return None
+        wdt = float(np.linalg.norm(dev[1] - dev[0])); hgt = float(np.linalg.norm(dev[3] - dev[0]))
+        if hgt <= 0 or not (1.2 <= wdt / hgt <= 3.0):   # aparelho tem que ser landscape plausível
+            return None
+        uL, uR, vT, vB = SCREEN_FRACS
+        quad = [tuple(map(int, _bilinear(dev, u, v))) for u, v in ((uL, vT), (uR, vT), (uR, vB), (uL, vB))]
+        cut = Image.open(cutout_path).convert("RGBA"); W, H = cut.size
+        cp = Image.open(CARPLAY_PATH).convert("RGBA"); w, h = cp.size
+        coeffs = _find_coeffs(quad, [(0, 0), (w, 0), (w, h), (0, h)])
+        warped = cp.transform((W, H), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
+        mask = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(mask).polygon(quad, fill=255)
+        cut.paste(warped, (0, 0), mask)
+        out = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + "_tela.png")
+        cut.save(out)
+        return out
+    except Exception:
+        return None
+
+
+def tratar_foto(foto_url: str, is_multimedia: bool = False) -> str:
     """Baixa a foto, remove o fundo (rembg) e, se for multimídia, compõe a tela CarPlay ligada."""
     raw = requests.get(foto_url, timeout=60).content
     r = requests.post(IMG_SVC + "/removebg",
@@ -150,11 +173,10 @@ def tratar_foto(foto_url: str) -> str:
         raise RuntimeError("removebg: " + str(r.get("error"))[:120])
     p = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + "_cut.png")
     open(p, "wb").write(base64.b64decode(r["image_base64"]))
-    # Composição da tela ligada: desligada por padrão (Claude não dá coordenada de pixel
-    # confiável; precisa de detector OpenCV). Ligar com KX3_COMPOR_TELA=1 quando pronto.
-    if os.environ.get("KX3_COMPOR_TELA", "0") == "1":
+    # Tela ligada (multimídias): detector OpenCV (alpha + inset). Ligado por padrão; desliga com KX3_COMPOR_TELA=0.
+    if os.environ.get("KX3_COMPOR_TELA", "1") == "1":
         try:
-            p2 = compor_tela_carplay(p)
+            p2 = compor_tela_carplay(p, is_multimedia)
             if p2:
                 try:
                     os.unlink(p)
@@ -197,17 +219,27 @@ inputs_especificos: [[INP]]
 Responda APENAS o JSON."""
 
 
-def claude_cli(prompt: str, allow_read: bool = False, timeout: int = 150) -> str:
+def claude_cli(prompt: str, allow_read: bool = False, timeout: int = 150, model: str = None) -> str:
+    # Clawdbot = Claude Max via OAuth (custo fixo). Roteia o modelo por tarefa
+    # (haiku p/ texto leve, sonnet p/ visão) p/ aliviar limite de uso. Fallback
+    # sem --model se o alias falhar (não quebra a geração).
     pf = os.path.join(tempfile.gettempdir(), "cl_%s.txt" % uuid.uuid4().hex)
     open(pf, "w", encoding="utf-8").write(prompt)
     os.chmod(pf, 0o644)
-    flags = "--allowedTools Read " if allow_read else ""
-    try:
+    read_flag = "--allowedTools Read " if allow_read else ""
+
+    def _run(model_flag):
         r = subprocess.run(
             ["runuser", "-u", "openclaw", "--", "bash", "-lc",
-             'HOME=/home/openclaw claude -p "$(cat %s)" %s--output-format text' % (pf, flags)],
+             'HOME=/home/openclaw claude -p "$(cat %s)" %s%s--output-format text' % (pf, read_flag, model_flag)],
             capture_output=True, text=True, timeout=timeout)
         return r.stdout or ""
+
+    try:
+        out = _run(("--model %s " % model) if model else "")
+        if model and not out.strip():
+            out = _run("")  # alias do modelo falhou -> tenta no modelo padrão
+        return out
     finally:
         try:
             os.unlink(pf)
@@ -232,7 +264,7 @@ def mapear_briefing(criativo: dict) -> dict:
           .replace("[[TEC]]", _j.dumps(criativo.get("briefing_tecnico"), ensure_ascii=False))
           .replace("[[COM]]", str(criativo.get("briefing_comercial") or ""))
           .replace("[[INP]]", _j.dumps(criativo.get("inputs_especificos") or {}, ensure_ascii=False)))
-    d = _extract_json(claude_cli(pr))
+    d = _extract_json(claude_cli(pr, model="haiku"))
     d.setdefault("handle", "@kx3acessorios")
     d.setdefault("site", "www.kx3.com.br")
     d.setdefault("sku", (criativo.get("skus") or [""])[0])
@@ -262,7 +294,7 @@ Responda so o JSON."""
 
 def revisar_copy(briefing: dict) -> dict:
     try:
-        d = _extract_json(claude_cli(REV_COPY_PROMPT.replace("[[JSON]]", json.dumps(briefing, ensure_ascii=False))))
+        d = _extract_json(claude_cli(REV_COPY_PROMPT.replace("[[JSON]]", json.dumps(briefing, ensure_ascii=False)), model="haiku"))
         for k in ("hx", "hw", "hh", "handle", "site", "sku"):
             if k in briefing:
                 d[k] = briefing[k]
@@ -277,7 +309,7 @@ def revisar_arte(img_path: str, arq: str) -> dict:
     try:
         return _extract_json(claude_cli(
             REV_ARTE_PROMPT.replace("[[ARQ]]", arq).replace("[[IMG]]", img_path),
-            allow_read=True, timeout=120))
+            allow_read=True, timeout=120, model="sonnet"))
     except Exception as e:
         return {"aprovado": True, "score": None, "problemas": [], "correcao": {}, "_erro": str(e)[:120]}
 
@@ -411,10 +443,12 @@ def gerar_criativo(req: GerarCriativoReq):
     c = req.criativo
     briefing = revisar_copy(mapear_briefing(c))  # mapeia + revisor ortográfico
     jobs = TIPO_ARQ.get(c.get("tipo"), [("flyer", "A")])
+    _ctx = (str(briefing.get("categoria", "")) + " " + str(briefing.get("nome", "")) + " " + str(briefing.get("sub", ""))).lower()
+    is_mm = any(k in _ctx for k in ("multimíd", "multimid", "central", "mp5", "carplay", "2-din", "2 din"))
     cutpath = None
     if req.foto_url:
         try:
-            cutpath = tratar_foto(req.foto_url)
+            cutpath = tratar_foto(req.foto_url, is_mm)
         except Exception:
             cutpath = None
     variacoes = []
