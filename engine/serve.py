@@ -90,9 +90,9 @@ A partir do BRIEFING abaixo, devolva APENAS um JSON (sem markdown, sem comentari
 {
  "sku": "primeiro SKU",
  "categoria": "categoria curta em CAIXA ALTA",
- "nome": "nome forte e curto do produto (linha grande)",
- "destaque": "1 atributo ancora curto (vira a linha laranja)",
- "sub": "SKU · atributo · atributo",
+ "nome": "titulo CURTO e forte, MAXIMO 16 caracteres, 1-2 palavras (ex.: Sensor de Re, Central Android, Som 4 Canais) — NAO use o nome completo aqui",
+ "destaque": "1 atributo ancora curto, MAXIMO 22 caracteres (vira a linha laranja)",
+ "sub": "SKU · atributo · atributo (curto, uma linha)",
  "bullets": [{"t":"beneficio curto","d":"spec/detalhe curto"} (EXATAMENTE 6)],
  "selos": [{"icon":"um de: wifi chip screen sound cam gps bolt star","big":"2-3 palavras","small":"detalhe curto"} (EXATAMENTE 3)],
  "promo_text": "1 frase de fechamento (diferencial + ganho)",
