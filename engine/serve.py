@@ -11,6 +11,8 @@
 import os, base64, json, uuid, subprocess, tempfile, shutil, time
 from typing import Optional
 import requests
+import numpy as np
+from PIL import Image, ImageDraw
 from fastapi import FastAPI
 from pydantic import BaseModel
 import gerador as g
@@ -88,8 +90,58 @@ IMG_SVC = "http://127.0.0.1:8088"
 IMG_TOKEN = "kx3img_Hs7Lp2Qw9Xz4Rt6Yb3Nf"
 
 
+CARPLAY_PATH = os.path.join(ASSETS, "carplay.png")
+TELA_PROMPT = """Olhe a imagem PNG em [[IMG]] (recorte de um produto automotivo, fundo transparente).
+Se for uma CENTRAL MULTIMIDIA / MP5 / aparelho com DISPLAY retangular, devolva APENAS JSON com os 4 cantos da AREA DE TELA (somente o display que acende, SEM a moldura/bezel preta ao redor e SEM a coluna de botoes lateral), em pixels (origem no canto superior esquerdo, numeros inteiros):
+{"tela": true, "tl":[x,y], "tr":[x,y], "br":[x,y], "bl":[x,y]}
+Se NAO houver display (sensor, soleira, cabo, modulo, antena, etc.), devolva {"tela": false}.
+Responda so o JSON."""
+
+
+def _find_coeffs(dst, src):
+    A = []
+    for (xo, yo), (xi, yi) in zip(dst, src):
+        A.append([xi, yi, 1, 0, 0, 0, -xo * xi, -xo * yi])
+        A.append([0, 0, 0, xi, yi, 1, -yo * xi, -yo * yi])
+    B = np.array([c for p in dst for c in p], dtype=float)
+    return np.linalg.solve(np.array(A, dtype=float), B).tolist()
+
+
+def compor_tela_carplay(cutout_path):
+    """Clawdbot localiza o display; se for multimídia, encaixa a tela CarPlay real (warp PIL)."""
+    if not os.path.exists(CARPLAY_PATH):
+        return None
+    rp = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + "_ask.png")
+    shutil.copy(cutout_path, rp); os.chmod(rp, 0o644)
+    try:
+        info = _extract_json(claude_cli(TELA_PROMPT.replace("[[IMG]]", rp), allow_read=True, timeout=120))
+    except Exception:
+        info = {"tela": False}
+    finally:
+        try:
+            os.unlink(rp)
+        except OSError:
+            pass
+    if not info.get("tela"):
+        return None
+    try:
+        quad = [(int(info[k][0]), int(info[k][1])) for k in ("tl", "tr", "br", "bl")]
+    except Exception:
+        return None
+    cut = Image.open(cutout_path).convert("RGBA"); W, H = cut.size
+    cp = Image.open(CARPLAY_PATH).convert("RGBA"); w, h = cp.size
+    coeffs = _find_coeffs(quad, [(0, 0), (w, 0), (w, h), (0, h)])
+    warped = cp.transform((W, H), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).polygon(quad, fill=255)
+    cut.paste(warped, (0, 0), mask)
+    out = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + "_tela.png")
+    cut.save(out)
+    return out
+
+
 def tratar_foto(foto_url: str) -> str:
-    """Baixa a foto, remove o fundo (rembg) e devolve o caminho de um PNG recortado."""
+    """Baixa a foto, remove o fundo (rembg) e, se for multimídia, compõe a tela CarPlay ligada."""
     raw = requests.get(foto_url, timeout=60).content
     r = requests.post(IMG_SVC + "/removebg",
                       headers={"Authorization": "Bearer " + IMG_TOKEN},
@@ -98,6 +150,16 @@ def tratar_foto(foto_url: str) -> str:
         raise RuntimeError("removebg: " + str(r.get("error"))[:120])
     p = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + "_cut.png")
     open(p, "wb").write(base64.b64decode(r["image_base64"]))
+    try:
+        p2 = compor_tela_carplay(p)
+        if p2:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+            return p2
+    except Exception:
+        pass
     return p
 
 
