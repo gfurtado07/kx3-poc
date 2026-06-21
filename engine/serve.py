@@ -83,6 +83,24 @@ def canva_import(url: str, title: str) -> dict:
     return {"error": "timeout"}
 
 
+# ---- tratamento de foto (kx3-imgservice: rembg) ----
+IMG_SVC = "http://127.0.0.1:8088"
+IMG_TOKEN = "kx3img_Hs7Lp2Qw9Xz4Rt6Yb3Nf"
+
+
+def tratar_foto(foto_url: str) -> str:
+    """Baixa a foto, remove o fundo (rembg) e devolve o caminho de um PNG recortado."""
+    raw = requests.get(foto_url, timeout=60).content
+    r = requests.post(IMG_SVC + "/removebg",
+                      headers={"Authorization": "Bearer " + IMG_TOKEN},
+                      json={"image_base64": base64.b64encode(raw).decode()}, timeout=120).json()
+    if not r.get("success"):
+        raise RuntimeError("removebg: " + str(r.get("error"))[:120])
+    p = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + "_cut.png")
+    open(p, "wb").write(base64.b64decode(r["image_base64"]))
+    return p
+
+
 # ---- mapeamento de briefing livre -> estruturado (via Clawdbot / Claude CLI) ----
 MAPPER_PROMPT = """Voce e o copywriter senior do Motor de Criativos da KX3 Acessorios Automotivos (acessorios automotivos premium; cores laranja/prata/preto; tom premium, tecnico e direto, sem exagero; portugues impecavel; numeros e termos tecnicos EXATOS; NUNCA invente specs).
 
@@ -228,6 +246,7 @@ TIPO_ARQ = {
 
 class GerarCriativoReq(BaseModel):
     criativo: dict
+    foto_url: Optional[str] = None
     cutout_b64: Optional[str] = None
     ia_b64: Optional[str] = None
 
@@ -238,9 +257,17 @@ def gerar_criativo(req: GerarCriativoReq):
     c = req.criativo
     briefing = mapear_briefing(c)
     jobs = TIPO_ARQ.get(c.get("tipo"), [("flyer", "A")])
+    cutpath = None
+    if req.foto_url:
+        try:
+            cutpath = tratar_foto(req.foto_url)
+        except Exception:
+            cutpath = None
     variacoes = []
     for i, (t, a) in enumerate(jobs):
         d = dict(briefing)
+        if cutpath:
+            d["cutout_path"] = cutpath
         tmp = _setup_assets(d, t, req.cutout_b64, req.ia_b64)
         try:
             o = _compose(d, t, a, True, True, "KX3 %s %s" % (c.get("nome_produto") or d.get("sku", ""), a))
@@ -255,4 +282,9 @@ def gerar_criativo(req: GerarCriativoReq):
                     os.unlink(p)
                 except OSError:
                     pass
+    if cutpath:
+        try:
+            os.unlink(cutpath)
+        except OSError:
+            pass
     return {"briefing": briefing, "variacoes": variacoes}
