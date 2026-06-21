@@ -189,6 +189,7 @@ Cheque pela regua KX3:
 3. Produto e o heroi, nitido e bem posicionado.
 4. Hierarquia clara, com respiro; nada espremido nem poluido.
 5. Portugues correto.
+Calibracao da nota (seja JUSTO, nao severo a toa): 95-100 = pronto pra publicar, sem nenhum problema real; 90-94 = bom, so ajuste cosmetico; 80-89 = problema visivel; <80 = erro grave (texto cortado, marca errada). Uma arte limpa, legivel e fiel a marca DEVE receber 95+.
 Devolva APENAS JSON: {"aprovado": true|false, "score": 0-100, "problemas": ["curto"], "correcao": {"campo_do_briefing": "novo valor"}}.
 Em "correcao" inclua SO ajustes de TEXTO do briefing que resolvam problemas de layout (ex.: encurtar "nome" ou "destaque" se cortou; encurtar um bullet longo). Se estiver bom: aprovado=true, problemas=[], correcao={}.
 Responda so o JSON."""
@@ -262,13 +263,16 @@ def _compose(d, tipo, arq, want_png=True, want_canva=True, title=None):
     return out
 
 
-REV_MAX = 2  # 1 geração + até 1 auto-correção pela revisão de qualidade
+MIN_SCORE = int(os.environ.get("KX3_MIN_SCORE", "95"))   # nota mínima p/ pré-aprovação
+MAX_TRIES = int(os.environ.get("KX3_MAX_TRIES", "4"))     # teto RÍGIDO de tentativas (protege orçamento)
 
 
 def _gerar_variacao(d, tipo, arq, title):
-    """Compõe, renderiza, REVISA a arte (visão) e auto-corrige até REV_MAX; publica o pré-aprovado."""
-    score = None; problemas = []; tentativas = 0; html = None; png = None
-    for attempt in range(REV_MAX):
+    """Compõe → renderiza (local, custo zero) → revisa por visão → auto-corrige até
+    score >= MIN_SCORE ou esgotar MAX_TRIES; publica a MELHOR tentativa, marcada se não bateu a meta."""
+    best = None
+    tentativas = 0
+    for attempt in range(MAX_TRIES):
         tentativas = attempt + 1
         html = g.montar(d, tipo, arq)
         png = render_png(html)
@@ -281,17 +285,27 @@ def _gerar_variacao(d, tipo, arq, title):
                 os.unlink(rp)
             except OSError:
                 pass
-        score = rev.get("score"); problemas = rev.get("problemas") or []
-        cor = rev.get("correcao") or {}
-        if rev.get("aprovado") or attempt == REV_MAX - 1 or not cor:
+        score = rev.get("score")
+        sc = score if isinstance(score, (int, float)) else -1
+        cand = {"score": score, "sc": sc, "html": html, "png": png, "problemas": rev.get("problemas") or []}
+        if best is None or sc > best["sc"]:
+            best = cand
+        if score is None or sc >= MIN_SCORE:   # bateu a meta OU revisão indisponível (fail-open)
+            best = cand
             break
-        for k, v in cor.items():
+        cor = rev.get("correcao") or {}
+        if not cor or attempt == MAX_TRIES - 1:
+            break
+        for k, v in cor.items():               # aplica correção (só texto escalar) e re-renderiza
             if k in d and isinstance(v, (str, int, float)):
                 d[k] = v
+    score = best["score"]
+    aprovado_ia = isinstance(score, (int, float)) and score >= MIN_SCORE
     uid = uuid.uuid4().hex
-    out = {"tipo": tipo, "arquetipo": arq, "score": score, "problemas": problemas, "tentativas": tentativas}
-    out["png_url"] = gh_put("gen/%s.png" % uid, png, "criativo png")
-    out["html_url"] = gh_put("gen/%s.html" % uid, html.encode("utf-8"), "criativo html")
+    out = {"tipo": tipo, "arquetipo": arq, "score": score, "problemas": best["problemas"],
+           "tentativas": tentativas, "aprovado_ia": aprovado_ia, "min_score": MIN_SCORE}
+    out["png_url"] = gh_put("gen/%s.png" % uid, best["png"], "criativo png")
+    out["html_url"] = gh_put("gen/%s.html" % uid, best["html"].encode("utf-8"), "criativo html")
     out["canva"] = canva_import(out["html_url"], title or ("KX3 %s %s" % (d.get("sku", ""), arq)))
     return out
 
@@ -349,7 +363,8 @@ def gerar_criativo(req: GerarCriativoReq):
             cv = o.get("canva") or {}
             variacoes.append({"idx": i, "arquetipo": t + "/" + a, "png": o.get("png_url"), "thumb": o.get("png_url"),
                               "edit_url": cv.get("edit_url"), "view_url": cv.get("view_url"), "canva_design_id": cv.get("design_id"),
-                              "score": o.get("score"), "problemas": o.get("problemas")})
+                              "score": o.get("score"), "problemas": o.get("problemas"),
+                              "aprovado_ia": o.get("aprovado_ia"), "tentativas": o.get("tentativas"), "min_score": o.get("min_score")})
         except Exception as e:
             variacoes.append({"idx": i, "arquetipo": t + "/" + a, "erro": str(e)[:200]})
         finally:
