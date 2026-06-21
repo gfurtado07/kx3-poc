@@ -151,7 +151,7 @@ def compor_tela_carplay(cutout_path, is_multimedia=False):
         quad = [tuple(map(int, _bilinear(dev, u, v))) for u, v in ((uL, vT), (uR, vT), (uR, vB), (uL, vB))]
         cut = Image.open(cutout_path).convert("RGBA"); W, H = cut.size
         cp = Image.open(CARPLAY_PATH).convert("RGBA"); w, h = cp.size
-        coeffs = _find_coeffs(quad, [(0, 0), (w, 0), (w, h), (0, h)])
+        coeffs = _find_coeffs([(0, 0), (w, 0), (w, h), (0, h)], quad)
         warped = cp.transform((W, H), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
         mask = Image.new("L", (W, H), 0)
         ImageDraw.Draw(mask).polygon(quad, fill=255)
