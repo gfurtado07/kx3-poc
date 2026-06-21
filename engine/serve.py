@@ -46,13 +46,12 @@ def render_png(html: str) -> bytes:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def publish_html(html: str) -> str:
-    """Publica o HTML no GitHub (Contents API) e devolve a URL raw (Canva importa por URL .html)."""
-    path = "gen/%s.html" % uuid.uuid4().hex
+def gh_put(path: str, content: bytes, msg: str) -> str:
+    """Publica bytes no GitHub (Contents API) e devolve a URL raw."""
     r = requests.put(
         "https://api.github.com/repos/%s/contents/%s" % (REPO, path),
         headers={"Authorization": "token %s" % GH_TOKEN, "Accept": "application/vnd.github+json"},
-        json={"message": "criativo gen", "content": base64.b64encode(html.encode("utf-8")).decode()},
+        json={"message": msg, "content": base64.b64encode(content).decode()},
         timeout=30,
     )
     r.raise_for_status()
@@ -110,13 +109,13 @@ def gerar(req: GerarReq):
             else:
                 d.setdefault("ia_lifestyle_path", os.path.join(ASSETS, "ia_lifestyle.jpg"))
         html = g.montar(d, req.tipo, req.arquetipo)
+        uid = uuid.uuid4().hex
         out = {"tipo": req.tipo, "arquetipo": req.arquetipo}
         if req.want_png:
-            out["png_b64"] = base64.b64encode(render_png(html)).decode()
+            out["png_url"] = gh_put("gen/%s.png" % uid, render_png(html), "criativo png")
         if req.want_canva:
-            url = publish_html(html)
-            out["html_url"] = url
-            out["canva"] = canva_import(url, req.title or ("KX3 %s %s" % (d.get("sku", ""), req.arquetipo)))
+            out["html_url"] = gh_put("gen/%s.html" % uid, html.encode("utf-8"), "criativo html")
+            out["canva"] = canva_import(out["html_url"], req.title or ("KX3 %s %s" % (d.get("sku", ""), req.arquetipo)))
         return out
     finally:
         for p in tmp:
