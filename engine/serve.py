@@ -104,12 +104,12 @@ A partir do BRIEFING abaixo, devolva APENAS um JSON (sem markdown, sem comentari
 Regras: use SO informacao do briefing; se faltar dado de promocao, deixe string vazia; se faltar spec para 6 bullets, reaproveite atributos reais de formas diferentes, NUNCA invente numero; escolha o icon mais coerente com cada selo.
 
 BRIEFING:
-tipo: %(tipo)s
-nome_produto: %(nome)s
-skus: %(skus)s
-briefing_tecnico: %(tec)s
-briefing_comercial: %(com)s
-inputs_especificos: %(inp)s
+tipo: [[TIPO]]
+nome_produto: [[NOME]]
+skus: [[SKUS]]
+briefing_tecnico: [[TEC]]
+briefing_comercial: [[COM]]
+inputs_especificos: [[INP]]
 
 Responda APENAS o JSON."""
 
@@ -141,14 +141,13 @@ def _extract_json(txt: str):
 
 def mapear_briefing(criativo: dict) -> dict:
     import json as _j
-    pr = MAPPER_PROMPT % {
-        "tipo": criativo.get("tipo", ""),
-        "nome": criativo.get("nome_produto", ""),
-        "skus": ", ".join(criativo.get("skus", []) or []),
-        "tec": _j.dumps(criativo.get("briefing_tecnico"), ensure_ascii=False),
-        "com": criativo.get("briefing_comercial") or "",
-        "inp": _j.dumps(criativo.get("inputs_especificos") or {}, ensure_ascii=False),
-    }
+    pr = (MAPPER_PROMPT
+          .replace("[[TIPO]]", str(criativo.get("tipo", "")))
+          .replace("[[NOME]]", str(criativo.get("nome_produto", "")))
+          .replace("[[SKUS]]", ", ".join(criativo.get("skus", []) or []))
+          .replace("[[TEC]]", _j.dumps(criativo.get("briefing_tecnico"), ensure_ascii=False))
+          .replace("[[COM]]", str(criativo.get("briefing_comercial") or ""))
+          .replace("[[INP]]", _j.dumps(criativo.get("inputs_especificos") or {}, ensure_ascii=False)))
     d = _extract_json(claude_cli(pr))
     d.setdefault("handle", "@kx3acessorios")
     d.setdefault("site", "www.kx3.com.br")
