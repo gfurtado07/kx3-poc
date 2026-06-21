@@ -8,7 +8,7 @@
 #
 # Segredos lidos do host (nunca no código): /root/.kx3_gh_token (PAT GitHub),
 # token do Canva via helper /root/kx3_canva_token.sh.
-import os, base64, uuid, subprocess, tempfile, shutil, time
+import os, base64, json, uuid, subprocess, tempfile, shutil, time
 from typing import Optional
 import requests
 from fastapi import FastAPI
