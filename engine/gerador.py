@@ -77,7 +77,29 @@ def _ic_chip(d, cx, cy):
 def _ic_screen(d, cx, cy):
     d.rounded_rectangle([cx-38, cy-26, cx+38, cy+22], radius=8, outline=(255, 255, 255, 235), width=7)
     d.line([cx-30, cy+20, cx-30, cy-18], fill=LAR_L, width=4); d.line([cx-16, cy+34, cx+16, cy+34], fill=(255, 255, 255, 220), width=7)
-_ICONS = {"wifi": _ic_wifi, "chip": _ic_chip, "screen": _ic_screen}
+def _ic_sound(d, cx, cy):
+    d.polygon([(cx-28, cy-9), (cx-12, cy-9), (cx+2, cy-24), (cx+2, cy+24), (cx-12, cy+9), (cx-28, cy+9)], outline=(255, 255, 255, 235), width=6)
+    for r, wd in [(16, 5), (27, 5)]:
+        d.arc([cx+2-r, cy-r, cx+2+r, cy+r], -50, 50, fill=LAR_L, width=wd)
+def _ic_cam(d, cx, cy):
+    d.rounded_rectangle([cx-34, cy-18, cx+34, cy+24], radius=9, outline=(255, 255, 255, 235), width=6)
+    d.rectangle([cx-24, cy-28, cx-4, cy-18], outline=(255, 255, 255, 235), width=5)
+    d.ellipse([cx-13, cy-7, cx+13, cy+19], outline=LAR_L, width=5)
+def _ic_gps(d, cx, cy):
+    d.ellipse([cx-20, cy-30, cx+20, cy+10], outline=(255, 255, 255, 235), width=6)
+    d.polygon([(cx-12, cy+1), (cx+12, cy+1), (cx, cy+34)], fill=(255, 255, 255, 235))
+    d.ellipse([cx-7, cy-17, cx+7, cy-3], fill=LAR_L)
+def _ic_bolt(d, cx, cy):
+    d.polygon([(cx+8, cy-34), (cx-18, cy+5), (cx-2, cy+5), (cx-8, cy+34), (cx+18, cy-7), (cx+2, cy-7)], fill=(255, 255, 255, 235))
+def _ic_star(d, cx, cy):
+    p = []
+    for i in range(10):
+        a = math.pi*i/5 - math.pi/2
+        r = 31 if i % 2 == 0 else 13
+        p.append((cx+r*math.cos(a), cy+r*math.sin(a)))
+    d.polygon(p, outline=(255, 255, 255, 235), width=5)
+_ICONS = {"wifi": _ic_wifi, "chip": _ic_chip, "screen": _ic_screen,
+          "sound": _ic_sound, "cam": _ic_cam, "gps": _ic_gps, "bolt": _ic_bolt, "star": _ic_star}
 
 # ===========================================================================
 # Builders de ASSET (retornam PIL.Image RGBA)

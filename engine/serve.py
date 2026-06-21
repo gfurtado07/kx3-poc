@@ -177,32 +177,82 @@ def health():
     return {"ok": True, "service": "kx3-criativos"}
 
 
+def _setup_assets(d, tipo, cutout_b64=None, ia_b64=None):
+    tmp = []
+    if cutout_b64:
+        d["cutout_path"] = _tmp_write(cutout_b64, ".png"); tmp.append(d["cutout_path"])
+    else:
+        d.setdefault("cutout_path", os.path.join(ASSETS, "produto_cut.png"))
+    if tipo == "post":
+        if ia_b64:
+            d["ia_lifestyle_path"] = _tmp_write(ia_b64, ".jpg"); tmp.append(d["ia_lifestyle_path"])
+        else:
+            d.setdefault("ia_lifestyle_path", os.path.join(ASSETS, "ia_lifestyle.jpg"))
+    return tmp
+
+
+def _compose(d, tipo, arq, want_png=True, want_canva=True, title=None):
+    html = g.montar(d, tipo, arq)
+    uid = uuid.uuid4().hex
+    out = {"tipo": tipo, "arquetipo": arq}
+    if want_png:
+        out["png_url"] = gh_put("gen/%s.png" % uid, render_png(html), "criativo png")
+    if want_canva:
+        out["html_url"] = gh_put("gen/%s.html" % uid, html.encode("utf-8"), "criativo html")
+        out["canva"] = canva_import(out["html_url"], title or ("KX3 %s %s" % (d.get("sku", ""), arq)))
+    return out
+
+
 @app.post("/gerar")
 def gerar(req: GerarReq):
     d = dict(req.briefing)
-    tmp = []
+    tmp = _setup_assets(d, req.tipo, req.cutout_b64, req.ia_b64)
     try:
-        if req.cutout_b64:
-            d["cutout_path"] = _tmp_write(req.cutout_b64, ".png"); tmp.append(d["cutout_path"])
-        else:
-            d.setdefault("cutout_path", os.path.join(ASSETS, "produto_cut.png"))
-        if req.tipo == "post":
-            if req.ia_b64:
-                d["ia_lifestyle_path"] = _tmp_write(req.ia_b64, ".jpg"); tmp.append(d["ia_lifestyle_path"])
-            else:
-                d.setdefault("ia_lifestyle_path", os.path.join(ASSETS, "ia_lifestyle.jpg"))
-        html = g.montar(d, req.tipo, req.arquetipo)
-        uid = uuid.uuid4().hex
-        out = {"tipo": req.tipo, "arquetipo": req.arquetipo}
-        if req.want_png:
-            out["png_url"] = gh_put("gen/%s.png" % uid, render_png(html), "criativo png")
-        if req.want_canva:
-            out["html_url"] = gh_put("gen/%s.html" % uid, html.encode("utf-8"), "criativo html")
-            out["canva"] = canva_import(out["html_url"], req.title or ("KX3 %s %s" % (d.get("sku", ""), req.arquetipo)))
-        return out
+        return _compose(d, req.tipo, req.arquetipo, req.want_png, req.want_canva, req.title)
     finally:
         for p in tmp:
             try:
                 os.unlink(p)
             except OSError:
                 pass
+
+
+# tipo do criativo -> arquétipos do engine (2-3 variações)
+TIPO_ARQ = {
+    "flyer_divulgacao": [("flyer", "A"), ("flyer", "C")],
+    "post_instagram": [("post", "lifestyle")],
+    "flyer_promocao": [("promo", "faixa")],
+    "flyer_campanha": [("flyer", "A")],
+}
+
+
+class GerarCriativoReq(BaseModel):
+    criativo: dict
+    cutout_b64: Optional[str] = None
+    ia_b64: Optional[str] = None
+
+
+@app.post("/gerar_criativo")
+def gerar_criativo(req: GerarCriativoReq):
+    """Mapeia o briefing livre (Clawdbot) e gera todas as variações do tipo."""
+    c = req.criativo
+    briefing = mapear_briefing(c)
+    jobs = TIPO_ARQ.get(c.get("tipo"), [("flyer", "A")])
+    variacoes = []
+    for i, (t, a) in enumerate(jobs):
+        d = dict(briefing)
+        tmp = _setup_assets(d, t, req.cutout_b64, req.ia_b64)
+        try:
+            o = _compose(d, t, a, True, True, "KX3 %s %s" % (c.get("nome_produto") or d.get("sku", ""), a))
+            cv = o.get("canva") or {}
+            variacoes.append({"idx": i, "arquetipo": t + "/" + a, "png": o.get("png_url"), "thumb": o.get("png_url"),
+                              "edit_url": cv.get("edit_url"), "view_url": cv.get("view_url"), "canva_design_id": cv.get("design_id")})
+        except Exception as e:
+            variacoes.append({"idx": i, "arquetipo": t + "/" + a, "erro": str(e)[:200]})
+        finally:
+            for p in tmp:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+    return {"briefing": briefing, "variacoes": variacoes}
