@@ -83,6 +83,90 @@ def canva_import(url: str, title: str) -> dict:
     return {"error": "timeout"}
 
 
+# ---- mapeamento de briefing livre -> estruturado (via Clawdbot / Claude CLI) ----
+MAPPER_PROMPT = """Voce e o copywriter senior do Motor de Criativos da KX3 Acessorios Automotivos (acessorios automotivos premium; cores laranja/prata/preto; tom premium, tecnico e direto, sem exagero; portugues impecavel; numeros e termos tecnicos EXATOS; NUNCA invente specs).
+
+A partir do BRIEFING abaixo, devolva APENAS um JSON (sem markdown, sem comentarios, sem texto antes/depois) com EXATAMENTE estas chaves preenchidas para ESTE produto:
+{
+ "sku": "primeiro SKU",
+ "categoria": "categoria curta em CAIXA ALTA",
+ "nome": "nome forte e curto do produto (linha grande)",
+ "destaque": "1 atributo ancora curto (vira a linha laranja)",
+ "sub": "SKU · atributo · atributo",
+ "bullets": [{"t":"beneficio curto","d":"spec/detalhe curto"} (EXATAMENTE 6)],
+ "selos": [{"icon":"um de: wifi chip screen sound cam gps bolt star","big":"2-3 palavras","small":"detalhe curto"} (EXATAMENTE 3)],
+ "promo_text": "1 frase de fechamento (diferencial + ganho)",
+ "headline_post": ["linha1 curtissima","linha2 curtissima"],
+ "sub_post": "1 linha de apoio",
+ "cta_post": "Saiba mais no link da bio",
+ "promo": {"selo":"OFERTA","desc":"-XX% ou vazio","de":"De R$ X ou vazio","por":"por R$ Y ou vazio","cond":"condicao ou vazio","validade":"validade ou vazio","cta":"Peca ja pelo WhatsApp"}
+}
+Regras: use SO informacao do briefing; se faltar dado de promocao, deixe string vazia; se faltar spec para 6 bullets, reaproveite atributos reais de formas diferentes, NUNCA invente numero; escolha o icon mais coerente com cada selo.
+
+BRIEFING:
+tipo: %(tipo)s
+nome_produto: %(nome)s
+skus: %(skus)s
+briefing_tecnico: %(tec)s
+briefing_comercial: %(com)s
+inputs_especificos: %(inp)s
+
+Responda APENAS o JSON."""
+
+
+def claude_cli(prompt: str) -> str:
+    pf = os.path.join(tempfile.gettempdir(), "mapper_%s.txt" % uuid.uuid4().hex)
+    open(pf, "w", encoding="utf-8").write(prompt)
+    os.chmod(pf, 0o644)
+    try:
+        r = subprocess.run(
+            ["runuser", "-u", "openclaw", "--", "bash", "-lc",
+             'HOME=/home/openclaw claude -p "$(cat %s)" --output-format text' % pf],
+            capture_output=True, text=True, timeout=150)
+        return r.stdout or ""
+    finally:
+        try:
+            os.unlink(pf)
+        except OSError:
+            pass
+
+
+def _extract_json(txt: str):
+    import re
+    m = re.search(r"\{.*\}", txt, re.S)
+    if not m:
+        raise ValueError("sem JSON na resposta: " + txt[:160])
+    return json.loads(m.group(0))
+
+
+def mapear_briefing(criativo: dict) -> dict:
+    import json as _j
+    pr = MAPPER_PROMPT % {
+        "tipo": criativo.get("tipo", ""),
+        "nome": criativo.get("nome_produto", ""),
+        "skus": ", ".join(criativo.get("skus", []) or []),
+        "tec": _j.dumps(criativo.get("briefing_tecnico"), ensure_ascii=False),
+        "com": criativo.get("briefing_comercial") or "",
+        "inp": _j.dumps(criativo.get("inputs_especificos") or {}, ensure_ascii=False),
+    }
+    d = _extract_json(claude_cli(pr))
+    d.setdefault("handle", "@kx3acessorios")
+    d.setdefault("site", "www.kx3.com.br")
+    d.setdefault("sku", (criativo.get("skus") or [""])[0])
+    for k, v in (("hx", 206), ("hw", 668), ("hh", 475)):
+        d.setdefault(k, v)
+    return d
+
+
+class PrepararReq(BaseModel):
+    criativo: dict
+
+
+@app.post("/preparar")
+def preparar(req: PrepararReq):
+    return {"briefing": mapear_briefing(req.criativo)}
+
+
 def _tmp_write(b64: str, suffix: str) -> str:
     p = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + suffix)
     open(p, "wb").write(base64.b64decode(b64))
