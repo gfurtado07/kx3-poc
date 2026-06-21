@@ -150,16 +150,19 @@ def tratar_foto(foto_url: str) -> str:
         raise RuntimeError("removebg: " + str(r.get("error"))[:120])
     p = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + "_cut.png")
     open(p, "wb").write(base64.b64decode(r["image_base64"]))
-    try:
-        p2 = compor_tela_carplay(p)
-        if p2:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
-            return p2
-    except Exception:
-        pass
+    # Composição da tela ligada: desligada por padrão (Claude não dá coordenada de pixel
+    # confiável; precisa de detector OpenCV). Ligar com KX3_COMPOR_TELA=1 quando pronto.
+    if os.environ.get("KX3_COMPOR_TELA", "0") == "1":
+        try:
+            p2 = compor_tela_carplay(p)
+            if p2:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+                return p2
+        except Exception:
+            pass
     return p
 
 
