@@ -92,8 +92,8 @@ IMG_TOKEN = "kx3img_Hs7Lp2Qw9Xz4Rt6Yb3Nf"
 
 CARPLAY_PATH = os.path.join(ASSETS, "carplay.png")
 TELA_PROMPT = """Olhe a imagem PNG em [[IMG]] (recorte de um produto automotivo, fundo transparente).
-Se for uma CENTRAL MULTIMIDIA / MP5 / aparelho com DISPLAY retangular, devolva APENAS JSON com os 4 cantos da AREA DE TELA (somente o display que acende, SEM a moldura/bezel preta ao redor e SEM a coluna de botoes lateral), em pixels (origem no canto superior esquerdo, numeros inteiros):
-{"tela": true, "tl":[x,y], "tr":[x,y], "br":[x,y], "bl":[x,y]}
+Se for uma CENTRAL MULTIMIDIA / MP5 / aparelho com DISPLAY retangular, devolva APENAS JSON com os 4 cantos da AREA DE TELA (somente o display que acende, SEM a moldura/bezel preta ao redor e SEM a coluna de botoes lateral), como PORCENTAGEM da imagem: cada ponto e [px, py] com px = posicao horizontal de 0 (borda esquerda) a 100 (borda direita) e py = posicao vertical de 0 (topo) a 100 (base). Pode usar decimais. Seja preciso, acompanhando a perspectiva (os 4 cantos podem formar um trapezio).
+{"tela": true, "tl":[px,py], "tr":[px,py], "br":[px,py], "bl":[px,py]}
 Se NAO houver display (sensor, soleira, cabo, modulo, antena, etc.), devolva {"tela": false}.
 Responda so o JSON."""
 
@@ -124,12 +124,12 @@ def compor_tela_carplay(cutout_path):
             pass
     if not info.get("tela"):
         return None
-    try:
-        quad = [(int(info[k][0]), int(info[k][1])) for k in ("tl", "tr", "br", "bl")]
-    except Exception:
-        return None
     cut = Image.open(cutout_path).convert("RGBA"); W, H = cut.size
     cp = Image.open(CARPLAY_PATH).convert("RGBA"); w, h = cp.size
+    try:
+        quad = [(int(float(info[k][0]) / 100.0 * W), int(float(info[k][1]) / 100.0 * H)) for k in ("tl", "tr", "br", "bl")]
+    except Exception:
+        return None
     coeffs = _find_coeffs(quad, [(0, 0), (w, 0), (w, h), (0, h)])
     warped = cp.transform((W, H), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
     mask = Image.new("L", (W, H), 0)
