@@ -110,6 +110,8 @@ def _find_coeffs(dst, src):
 # Frações do display dentro do quad do aparelho (2-DIN com coluna de botões à esquerda).
 # uL pula os botões; uR/vT/vB são insets finos. Default geral; pode virar override por SKU.
 SCREEN_FRACS = (0.085, 0.992, 0.010, 0.990)
+# Override por SKU (uL, uR, vT, vB) p/ multimídias de layout diferente. Chave = SKU em MAIÚSCULAS.
+SCREEN_FRACS_BY_SKU = {}
 
 
 def _device_quad(cutout_path):
@@ -135,7 +137,7 @@ def _bilinear(q, u, v):
     return top + (bot - top) * v
 
 
-def compor_tela_carplay(cutout_path, is_multimedia=False):
+def compor_tela_carplay(cutout_path, is_multimedia=False, sku=None):
     """Só p/ multimídias: detecta o aparelho (alpha) → calcula a tela por proporção → encaixa
     a tela CarPlay real com warp de perspectiva (PIL). Retorna novo PNG ou None."""
     if not is_multimedia or not os.path.exists(CARPLAY_PATH):
@@ -147,7 +149,7 @@ def compor_tela_carplay(cutout_path, is_multimedia=False):
         wdt = float(np.linalg.norm(dev[1] - dev[0])); hgt = float(np.linalg.norm(dev[3] - dev[0]))
         if hgt <= 0 or not (1.2 <= wdt / hgt <= 3.0):   # aparelho tem que ser landscape plausível
             return None
-        uL, uR, vT, vB = SCREEN_FRACS
+        uL, uR, vT, vB = SCREEN_FRACS_BY_SKU.get((sku or "").upper(), SCREEN_FRACS)
         quad = [tuple(map(int, _bilinear(dev, u, v))) for u, v in ((uL, vT), (uR, vT), (uR, vB), (uL, vB))]
         cut = Image.open(cutout_path).convert("RGBA"); W, H = cut.size
         cp = Image.open(CARPLAY_PATH).convert("RGBA"); w, h = cp.size
@@ -163,7 +165,7 @@ def compor_tela_carplay(cutout_path, is_multimedia=False):
         return None
 
 
-def tratar_foto(foto_url: str, is_multimedia: bool = False) -> str:
+def tratar_foto(foto_url: str, is_multimedia: bool = False, sku: str = None) -> str:
     """Baixa a foto, remove o fundo (rembg) e, se for multimídia, compõe a tela CarPlay ligada."""
     raw = requests.get(foto_url, timeout=60).content
     r = requests.post(IMG_SVC + "/removebg",
@@ -176,7 +178,7 @@ def tratar_foto(foto_url: str, is_multimedia: bool = False) -> str:
     # Tela ligada (multimídias): detector OpenCV (alpha + inset). Ligado por padrão; desliga com KX3_COMPOR_TELA=0.
     if os.environ.get("KX3_COMPOR_TELA", "1") == "1":
         try:
-            p2 = compor_tela_carplay(p, is_multimedia)
+            p2 = compor_tela_carplay(p, is_multimedia, sku)
             if p2:
                 try:
                     os.unlink(p)
@@ -255,7 +257,31 @@ def _extract_json(txt: str):
     return json.loads(m.group(0))
 
 
-def mapear_briefing(criativo: dict) -> dict:
+# ---- Aprendizado: lê regras (de reprovações) e ajustes (texto) do Supabase ----
+SB_URL = "https://iagtcfrhkatyszifudzu.supabase.co/rest/v1/"
+SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlhZ3RjZnJoa2F0eXN6aWZ1ZHp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4MjQwMTgsImV4cCI6MjA5NDQwMDAxOH0.s-n8uE7JFHawu21abrEvhm78ZAd09FTeYyDStqTiPKw"
+SB_H = {"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY}
+
+
+def sb_get(path):
+    try:
+        r = requests.get(SB_URL + path, headers=SB_H, timeout=20)
+        return r.json() if r.status_code < 300 and isinstance(r.json(), list) else []
+    except Exception:
+        return []
+
+
+def fetch_regras(tipo):
+    rows = sb_get("kx3_criativo_aprendizado?classe=eq.regra&ativo=eq.true&or=(tipo.eq.%s,tipo.is.null)&select=conteudo&order=created_at.desc&limit=20" % tipo)
+    return [r["conteudo"] for r in rows if r.get("conteudo")]
+
+
+def fetch_instrucoes(criativo_id):
+    rows = sb_get("kx3_criativo_versoes?criativo_id=eq.%s&origem=eq.ajuste_texto&select=instrucao&order=versao.asc" % criativo_id)
+    return [r["instrucao"] for r in rows if r.get("instrucao")]
+
+
+def mapear_briefing(criativo: dict, instrucoes=None, regras=None) -> dict:
     import json as _j
     pr = (MAPPER_PROMPT
           .replace("[[TIPO]]", str(criativo.get("tipo", "")))
@@ -264,6 +290,13 @@ def mapear_briefing(criativo: dict) -> dict:
           .replace("[[TEC]]", _j.dumps(criativo.get("briefing_tecnico"), ensure_ascii=False))
           .replace("[[COM]]", str(criativo.get("briefing_comercial") or ""))
           .replace("[[INP]]", _j.dumps(criativo.get("inputs_especificos") or {}, ensure_ascii=False)))
+    extra = ""
+    if regras:
+        extra += "\n\nREGRAS APRENDIDAS (siga à risca, vieram de reprovações anteriores):\n" + "\n".join("- " + str(r) for r in regras)
+    if instrucoes:
+        extra += "\n\nAJUSTES PEDIDOS PELO HUMANO nesta peça (aplique TODOS, são prioridade máxima):\n" + "\n".join("- " + str(i) for i in instrucoes)
+    if extra:
+        pr = pr + extra + "\n\nResponda APENAS o JSON."
     d = _extract_json(claude_cli(pr, model="haiku"))
     d.setdefault("handle", "@kx3acessorios")
     d.setdefault("site", "www.kx3.com.br")
@@ -306,12 +339,14 @@ def revisar_copy(briefing: dict) -> dict:
 
 
 def revisar_arte(img_path: str, arq: str) -> dict:
-    try:
-        return _extract_json(claude_cli(
-            REV_ARTE_PROMPT.replace("[[ARQ]]", arq).replace("[[IMG]]", img_path),
-            allow_read=True, timeout=120, model="sonnet"))
-    except Exception as e:
-        return {"aprovado": True, "score": None, "problemas": [], "correcao": {}, "_erro": str(e)[:120]}
+    prompt = REV_ARTE_PROMPT.replace("[[ARQ]]", arq).replace("[[IMG]]", img_path)
+    last = "?"
+    for _ in range(2):  # 1 tentativa + 1 retry se a revisão falhar/sair sem JSON
+        try:
+            return _extract_json(claude_cli(prompt, allow_read=True, timeout=120, model="sonnet"))
+        except Exception as e:
+            last = str(e)[:120]
+    return {"aprovado": True, "score": None, "problemas": [], "correcao": {}, "_erro": last}
 
 
 class PrepararReq(BaseModel):
@@ -433,6 +468,7 @@ TIPO_ARQ = {
 class GerarCriativoReq(BaseModel):
     criativo: dict
     foto_url: Optional[str] = None
+    instrucao: Optional[str] = None
     cutout_b64: Optional[str] = None
     ia_b64: Optional[str] = None
 
@@ -441,14 +477,18 @@ class GerarCriativoReq(BaseModel):
 def gerar_criativo(req: GerarCriativoReq):
     """Mapeia o briefing livre (Clawdbot) e gera todas as variações do tipo."""
     c = req.criativo
-    briefing = revisar_copy(mapear_briefing(c))  # mapeia + revisor ortográfico
+    regras = fetch_regras(str(c.get("tipo", "")))                 # aprendizado: regras de reprovações
+    instrucoes = fetch_instrucoes(str(c.get("id", "")))           # ajustes em texto já pedidos
+    if req.instrucao and req.instrucao not in instrucoes:
+        instrucoes = instrucoes + [req.instrucao]
+    briefing = revisar_copy(mapear_briefing(c, instrucoes, regras))  # mapeia (c/ regras+ajustes) + ortográfico
     jobs = TIPO_ARQ.get(c.get("tipo"), [("flyer", "A")])
     _ctx = (str(briefing.get("categoria", "")) + " " + str(briefing.get("nome", "")) + " " + str(briefing.get("sub", ""))).lower()
     is_mm = any(k in _ctx for k in ("multimíd", "multimid", "central", "mp5", "carplay", "2-din", "2 din"))
     cutpath = None
     if req.foto_url:
         try:
-            cutpath = tratar_foto(req.foto_url, is_mm)
+            cutpath = tratar_foto(req.foto_url, is_mm, briefing.get("sku"))
         except Exception:
             cutpath = None
     variacoes = []
