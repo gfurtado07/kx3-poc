@@ -132,15 +132,16 @@ inputs_especificos: [[INP]]
 Responda APENAS o JSON."""
 
 
-def claude_cli(prompt: str) -> str:
-    pf = os.path.join(tempfile.gettempdir(), "mapper_%s.txt" % uuid.uuid4().hex)
+def claude_cli(prompt: str, allow_read: bool = False, timeout: int = 150) -> str:
+    pf = os.path.join(tempfile.gettempdir(), "cl_%s.txt" % uuid.uuid4().hex)
     open(pf, "w", encoding="utf-8").write(prompt)
     os.chmod(pf, 0o644)
+    flags = "--allowedTools Read " if allow_read else ""
     try:
         r = subprocess.run(
             ["runuser", "-u", "openclaw", "--", "bash", "-lc",
-             'HOME=/home/openclaw claude -p "$(cat %s)" --output-format text' % pf],
-            capture_output=True, text=True, timeout=150)
+             'HOME=/home/openclaw claude -p "$(cat %s)" %s--output-format text' % (pf, flags)],
+            capture_output=True, text=True, timeout=timeout)
         return r.stdout or ""
     finally:
         try:
@@ -173,6 +174,46 @@ def mapear_briefing(criativo: dict) -> dict:
     for k, v in (("hx", 206), ("hw", 668), ("hh", 475)):
         d.setdefault(k, v)
     return d
+
+
+# ---- Revisores de IA (Fase 3) — Clawdbot ----
+REV_COPY_PROMPT = """Voce e revisor ortografico e tecnico da KX3. Revise SOMENTE a escrita dos textos no JSON abaixo: corrija portugues, acentuacao e termos tecnicos. NAO mude o sentido, NAO invente, NAO altere numeros nem a estrutura/chaves. Devolva APENAS o JSON corrigido, mesmas chaves.
+JSON:
+[[JSON]]
+Responda so o JSON."""
+
+REV_ARTE_PROMPT = """Voce e diretor de arte senior da KX3 Acessorios Automotivos revisando um criativo (arquetipo [[ARQ]]). Leia e analise a imagem em [[IMG]].
+Cheque pela regua KX3:
+1. NENHUM texto cortado, sobreposto, estourando a margem ou ilegivel.
+2. Identidade: cores laranja/prata/preto, logo KX3 visivel com respiro.
+3. Produto e o heroi, nitido e bem posicionado.
+4. Hierarquia clara, com respiro; nada espremido nem poluido.
+5. Portugues correto.
+Devolva APENAS JSON: {"aprovado": true|false, "score": 0-100, "problemas": ["curto"], "correcao": {"campo_do_briefing": "novo valor"}}.
+Em "correcao" inclua SO ajustes de TEXTO do briefing que resolvam problemas de layout (ex.: encurtar "nome" ou "destaque" se cortou; encurtar um bullet longo). Se estiver bom: aprovado=true, problemas=[], correcao={}.
+Responda so o JSON."""
+
+
+def revisar_copy(briefing: dict) -> dict:
+    try:
+        d = _extract_json(claude_cli(REV_COPY_PROMPT.replace("[[JSON]]", json.dumps(briefing, ensure_ascii=False))))
+        for k in ("hx", "hw", "hh", "handle", "site", "sku"):
+            if k in briefing:
+                d[k] = briefing[k]
+        if not d.get("bullets") or not d.get("selos"):
+            return briefing
+        return d
+    except Exception:
+        return briefing
+
+
+def revisar_arte(img_path: str, arq: str) -> dict:
+    try:
+        return _extract_json(claude_cli(
+            REV_ARTE_PROMPT.replace("[[ARQ]]", arq).replace("[[IMG]]", img_path),
+            allow_read=True, timeout=120))
+    except Exception as e:
+        return {"aprovado": True, "score": None, "problemas": [], "correcao": {}, "_erro": str(e)[:120]}
 
 
 class PrepararReq(BaseModel):
@@ -221,6 +262,40 @@ def _compose(d, tipo, arq, want_png=True, want_canva=True, title=None):
     return out
 
 
+REV_MAX = 2  # 1 geração + até 1 auto-correção pela revisão de qualidade
+
+
+def _gerar_variacao(d, tipo, arq, title):
+    """Compõe, renderiza, REVISA a arte (visão) e auto-corrige até REV_MAX; publica o pré-aprovado."""
+    score = None; problemas = []; tentativas = 0; html = None; png = None
+    for attempt in range(REV_MAX):
+        tentativas = attempt + 1
+        html = g.montar(d, tipo, arq)
+        png = render_png(html)
+        rp = os.path.join(tempfile.gettempdir(), "rev_%s.png" % uuid.uuid4().hex)
+        open(rp, "wb").write(png); os.chmod(rp, 0o644)
+        try:
+            rev = revisar_arte(rp, arq)
+        finally:
+            try:
+                os.unlink(rp)
+            except OSError:
+                pass
+        score = rev.get("score"); problemas = rev.get("problemas") or []
+        cor = rev.get("correcao") or {}
+        if rev.get("aprovado") or attempt == REV_MAX - 1 or not cor:
+            break
+        for k, v in cor.items():
+            if k in d and isinstance(v, (str, int, float)):
+                d[k] = v
+    uid = uuid.uuid4().hex
+    out = {"tipo": tipo, "arquetipo": arq, "score": score, "problemas": problemas, "tentativas": tentativas}
+    out["png_url"] = gh_put("gen/%s.png" % uid, png, "criativo png")
+    out["html_url"] = gh_put("gen/%s.html" % uid, html.encode("utf-8"), "criativo html")
+    out["canva"] = canva_import(out["html_url"], title or ("KX3 %s %s" % (d.get("sku", ""), arq)))
+    return out
+
+
 @app.post("/gerar")
 def gerar(req: GerarReq):
     d = dict(req.briefing)
@@ -255,7 +330,7 @@ class GerarCriativoReq(BaseModel):
 def gerar_criativo(req: GerarCriativoReq):
     """Mapeia o briefing livre (Clawdbot) e gera todas as variações do tipo."""
     c = req.criativo
-    briefing = mapear_briefing(c)
+    briefing = revisar_copy(mapear_briefing(c))  # mapeia + revisor ortográfico
     jobs = TIPO_ARQ.get(c.get("tipo"), [("flyer", "A")])
     cutpath = None
     if req.foto_url:
@@ -270,10 +345,11 @@ def gerar_criativo(req: GerarCriativoReq):
             d["cutout_path"] = cutpath
         tmp = _setup_assets(d, t, req.cutout_b64, req.ia_b64)
         try:
-            o = _compose(d, t, a, True, True, "KX3 %s %s" % (c.get("nome_produto") or d.get("sku", ""), a))
+            o = _gerar_variacao(d, t, a, "KX3 %s %s" % (c.get("nome_produto") or d.get("sku", ""), a))
             cv = o.get("canva") or {}
             variacoes.append({"idx": i, "arquetipo": t + "/" + a, "png": o.get("png_url"), "thumb": o.get("png_url"),
-                              "edit_url": cv.get("edit_url"), "view_url": cv.get("view_url"), "canva_design_id": cv.get("design_id")})
+                              "edit_url": cv.get("edit_url"), "view_url": cv.get("view_url"), "canva_design_id": cv.get("design_id"),
+                              "score": o.get("score"), "problemas": o.get("problemas")})
         except Exception as e:
             variacoes.append({"idx": i, "arquetipo": t + "/" + a, "erro": str(e)[:200]})
         finally:
